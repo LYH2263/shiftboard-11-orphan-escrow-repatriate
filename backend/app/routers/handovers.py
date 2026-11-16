@@ -29,3 +29,8 @@ def start(body: StartBody):
 @router.post("/{handover_id}/complete")
 def complete(handover_id: int):
     return svc.complete_handover(handover_id)
+
+
+@router.post("/{handover_id}/cancel")
+def cancel(handover_id: int):
+    return svc.cancel_handover(handover_id)

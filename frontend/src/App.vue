@@ -14,6 +14,7 @@
         <router-link to="/handover">交班办理</router-link>
         <router-link to="/logs">交班记录</router-link>
         <router-link to="/reconcile">交班对账</router-link>
+        <router-link to="/repatriate">归位与隔离</router-link>
       </nav>
     </header>
     <div class="ribbon" aria-hidden="true">

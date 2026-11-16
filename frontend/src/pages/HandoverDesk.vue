@@ -42,6 +42,20 @@ async function start() {
   }
 }
 
+async function cancel() {
+  if (!current.value) return
+  msg.value = ''
+  ok.value = false
+  try {
+    const h = await postJson(`/api/handovers/${current.value.id}/cancel`)
+    ok.value = true
+    msg.value = `交班单 #${h.id} 已取消，托管批次已整批回 ${h.from_shift_name} 在途`
+    await refresh()
+  } catch (e) {
+    msg.value = String(e.message || e)
+  }
+}
+
 async function complete() {
   if (!current.value) return
   msg.value = ''
@@ -62,7 +76,7 @@ async function complete() {
 <template>
   <div>
     <h1>交班办理</h1>
-    <p class="lead">同一时刻只允许一单进行中的交班；清单内在途批次必须整批过户，禁止只改单据不改归属。</p>
+    <p class="lead">同一时刻只允许一单进行中的交班；开单即在途批次整批转入托管，完成时整批过户，禁止只改单据不改归属。</p>
 
     <div class="panel">
       <div class="row">
@@ -78,6 +92,7 @@ async function complete() {
         </label>
         <button class="btn" :disabled="!!current" @click="start">发起交班</button>
         <button class="btn ghost" :disabled="!current" @click="complete">完成交班</button>
+        <button class="btn ghost" :disabled="!current" @click="cancel">取消交班</button>
       </div>
       <p class="msg" :class="{ ok }">{{ msg }}</p>
     </div>
@@ -85,7 +100,8 @@ async function complete() {
     <div class="panel" v-if="current">
       <h2>当前交班单 #{{ current.id }} · {{ current.status }}</h2>
       <p class="lead" style="margin-bottom:12px">
-        {{ current.from_shift_name }} → {{ current.to_shift_name }} · 清单 {{ current.batch_count }} 批
+        {{ current.from_shift_name }} → {{ current.to_shift_name }} · 清单 {{ current.batch_count }} 批 ·
+        清单批次在交班完成前处于「托管」态
       </p>
       <table>
         <thead><tr><th>业务键</th><th>标题</th><th>状态</th></tr></thead>

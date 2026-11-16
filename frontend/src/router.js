@@ -5,6 +5,7 @@ import Batches from './pages/Batches.vue'
 import HandoverDesk from './pages/HandoverDesk.vue'
 import HandoverLogs from './pages/HandoverLogs.vue'
 import Reconcile from './pages/Reconcile.vue'
+import Repatriate from './pages/Repatriate.vue'
 
 export default createRouter({
   history: createWebHistory(),
@@ -15,5 +16,6 @@ export default createRouter({
     { path: '/handover', component: HandoverDesk },
     { path: '/logs', component: HandoverLogs },
     { path: '/reconcile', component: Reconcile },
+    { path: '/repatriate', component: Repatriate },
   ],
 })

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 
 from app.db import connect, rows_to_dicts
+from app.services import collections
 
 
 def _now() -> str:
@@ -92,9 +93,9 @@ def get_handover(handover_id: int) -> dict:
 def dashboard() -> dict:
     with connect() as conn:
         shifts = rows_to_dicts(conn.execute("SELECT * FROM shifts ORDER BY id").fetchall())
-        inflight = conn.execute(
-            "SELECT COUNT(*) AS c FROM batches WHERE status = '在途'"
-        ).fetchone()["c"]
+        inflight = collections.inflight_count(conn)
+        escrow = collections.escrow_count(conn)
+        quarantined = collections.orphan_count(conn)
         active = conn.execute(
             "SELECT COUNT(*) AS c FROM handovers WHERE status = '进行中'"
         ).fetchone()["c"]
@@ -104,6 +105,8 @@ def dashboard() -> dict:
         return {
             "班次数": len(shifts),
             "在途批次数": inflight,
+            "托管批次数": escrow,
+            "孤儿隔离数": quarantined,
             "进行中交班": active,
             "最近交班": dict(last) if last else None,
             "班次": shifts,
@@ -129,6 +132,7 @@ def start_handover(from_shift_id: int, to_shift_id: int) -> dict:
         ).fetchall()
         if not batches:
             raise HTTPException(400, "交班方没有在途批次可交接")
+        # 开单即托管：清单在途批次挂到本单，避免中断后成为无交班单引用的托管批
         cur = conn.execute(
             """
             INSERT INTO handovers(from_shift_id, to_shift_id, status, batch_count, started_at)
@@ -141,6 +145,14 @@ def start_handover(from_shift_id: int, to_shift_id: int) -> dict:
             conn.execute(
                 "INSERT INTO handover_items(handover_id, batch_id) VALUES (?, ?)",
                 (hid, b["id"]),
+            )
+            conn.execute(
+                """
+                UPDATE batches
+                SET status = '托管', escrow_handover_id = ?, escrow_at = ?
+                WHERE id = ? AND status = '在途'
+                """,
+                (hid, _now(), b["id"]),
             )
         conn.execute("UPDATE shifts SET status = '交班中' WHERE id = ?", (from_shift_id,))
         conn.execute("UPDATE shifts SET status = '接班中' WHERE id = ?", (to_shift_id,))
@@ -159,12 +171,32 @@ def complete_handover(handover_id: int) -> dict:
             "SELECT batch_id FROM handover_items WHERE handover_id = ?",
             (handover_id,),
         ).fetchall()
-        before = len(items)
-        # 交班完成：整批过户，禁止只改交班单状态不改归属
+        # 只认本单托管的批次；清单在途但未托管的批不参与过户（对账会暴露）
+        before = 0
+        landed = 0
         for it in items:
+            cur = conn.execute(
+                """
+                UPDATE batches SET status = '在途', owner_shift_id = ?,
+                       escrow_handover_id = NULL, escrow_at = NULL
+                WHERE id = ? AND status = '托管' AND escrow_handover_id = ?
+                """,
+                (h["to_shift_id"], it["batch_id"], handover_id),
+            )
+            before += cur.rowcount
+            if cur.rowcount == 1:
+                landed += 1
+        # 一致性按本单清单判定：清单内每批都必须落到接班方在途。
+        # 任一清单批没托管住即判失败，并把已过户的整批退回交班方，避免双轨。
+        consistent = 1 if before == len(items) and landed == len(items) else 0
+        if not consistent:
             conn.execute(
-                "UPDATE batches SET owner_shift_id = ? WHERE id = ? AND status = '在途'",
-                (h["to_shift_id"], it["batch_id"]),
+                """
+                UPDATE batches SET owner_shift_id = ?
+                WHERE id IN (SELECT batch_id FROM handover_items WHERE handover_id = ?)
+                  AND status = '在途'
+                """,
+                (h["from_shift_id"], handover_id),
             )
         after_from = conn.execute(
             "SELECT COUNT(*) AS c FROM batches WHERE owner_shift_id = ? AND status = '在途'",
@@ -174,7 +206,6 @@ def complete_handover(handover_id: int) -> dict:
             "SELECT COUNT(*) AS c FROM batches WHERE owner_shift_id = ? AND status = '在途'",
             (h["to_shift_id"],),
         ).fetchone()["c"]
-        consistent = 1 if after_from == 0 and after_to >= before else 0
         detail = {
             "交班前在途数": before,
             "交班后交班方在途": after_from,
@@ -215,6 +246,32 @@ def complete_handover(handover_id: int) -> dict:
                 _now(),
             ),
         )
+        conn.commit()
+    return get_handover(handover_id)
+
+
+def cancel_handover(handover_id: int, reason: str = "") -> dict:
+    with connect() as conn:
+        h = conn.execute("SELECT * FROM handovers WHERE id = ?", (handover_id,)).fetchone()
+        if not h:
+            raise HTTPException(404, "交班单不存在")
+        if h["status"] != "进行中":
+            raise HTTPException(400, "只能取消进行中的交班单")
+        # 取消即解除托管并整批回交班方在途，避免留下无单引用的托管批
+        conn.execute(
+            """
+            UPDATE batches SET status = '在途', owner_shift_id = ?,
+                   escrow_handover_id = NULL, escrow_at = NULL
+            WHERE status = '托管' AND escrow_handover_id = ?
+            """,
+            (h["from_shift_id"], handover_id),
+        )
+        conn.execute(
+            "UPDATE handovers SET status = '已取消', reason = ?, finished_at = ? WHERE id = ?",
+            (reason or "人工取消交班", _now(), handover_id),
+        )
+        conn.execute("UPDATE shifts SET status = '值班中' WHERE id = ?", (h["from_shift_id"],))
+        conn.execute("UPDATE shifts SET status = '空闲' WHERE id = ?", (h["to_shift_id"],))
         conn.commit()
     return get_handover(handover_id)
 
